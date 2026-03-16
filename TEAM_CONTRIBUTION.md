@@ -8,15 +8,15 @@ This document outlines the general contributions of each team member to the Real
 
 | Member | Role |
 |--------|------|
-| A | Project Lead & AI Integration |
-| B | Data Engineering |
-| C | Technical Analysis & Scoring |
-| D | Frontend & User Interface |
-| E | Testing & Documentation |
+| Hanyang Gu | Project Lead & AI Integration |
+| Zheng Zhu | Data Engineering |
+| Jiahua Jia | Technical Analysis & Scoring |
+| Mavis Xuan | Frontend & User Interface |
+| Xiangning Li | Testing & Documentation |
 
 ---
 
-## 👤 Member A — Project Lead & AI Integration
+## 👤 Member Hanyang Gu — Project Lead & AI Integration
 
 - Led overall project architecture and design decisions
 - Integrated OpenAI GPT API with tool calling system
@@ -27,7 +27,7 @@ This document outlines the general contributions of each team member to the Real
 
 ---
 
-## 👤 Member B — Data Engineering
+## 👤 Member Zheng Zhu — Data Engineering
 
 - Integrated Yahoo Finance API for real-time market data
 - Built the ticker resolution system to convert company names to ticker symbols
@@ -37,7 +37,7 @@ This document outlines the general contributions of each team member to the Real
 
 ---
 
-## 👤 Member C — Technical Analysis & Scoring
+## 👤 Member Jiahua Jia — Technical Analysis & Scoring
 
 - Implemented all 9 technical indicators across 3 categories:
   - Momentum: RSI, Stochastic Oscillator, Rate of Change
@@ -50,7 +50,7 @@ This document outlines the general contributions of each team member to the Real
 
 ---
 
-## 👤 Member D — Frontend & User Interface
+## 👤 Member Mavis Xuan — Frontend & User Interface
 
 - Built the Streamlit web application layout and design
 - Created the colored score card components
@@ -61,7 +61,7 @@ This document outlines the general contributions of each team member to the Real
 
 ---
 
-## 👤 Member E — Testing & Documentation
+## 👤 Member Xiangning Li — Testing & Documentation
 
 - Conducted end-to-end testing and identified bugs across all components
 - Validated scoring accuracy across multiple stock types
@@ -79,11 +79,11 @@ This document outlines the general contributions of each team member to the Real
 ## 📊 Contribution Summary
 
 ```
-Member A  --  AI & GPT Integration
-Member B  --  Data & Market Feeds
-Member C  --  Technical Analysis Engine
-Member D  --  Streamlit Frontend
-Member E  --  Testing & Documentation
+Member Hanyang Gu  --  AI & GPT Integration
+Member Zheng Zhu  --  Data & Market Feeds
+Member Jiahua Jia  --  Technical Analysis Engine
+Member Mavis Xuan  --  Streamlit Frontend
+Member Xiangning Li  --  Testing & Documentation
 ```
 
 ---
