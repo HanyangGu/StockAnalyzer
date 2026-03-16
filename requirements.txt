@@ -6,14 +6,13 @@
 # Data
 yfinance
 pandas
-numpy
+numpy==2.2.3
 
 # AI
 openai
 
 # Frontend
 streamlit==1.32.0
-altair==4.2.2
 
 # Utilities
 python-dateutil
