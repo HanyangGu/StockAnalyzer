@@ -1,0 +1,19 @@
+# ============================================================
+# requirements.txt
+# Stock Analysis Chatbot
+# ============================================================
+
+# Data
+yfinance==0.2.54
+pandas==2.2.3
+numpy==1.26.4
+
+# AI
+openai==1.65.4
+
+# Frontend
+streamlit==1.43.2
+
+# Utilities
+python-dateutil==2.9.0
+pytz==2024.1
