@@ -4,16 +4,16 @@
 # ============================================================
 
 # Data
-yfinance==0.2.54
-pandas==2.2.3
-numpy==1.26.4
+yfinance
+pandas
+numpy
 
 # AI
-openai==1.65.4
+openai
 
 # Frontend
-streamlit==1.43.2
+streamlit
 
 # Utilities
-python-dateutil==2.9.0
-pytz==2024.1
+python-dateutil
+pytz
