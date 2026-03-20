@@ -1162,6 +1162,10 @@ class StockChatbot:
         self.model   = st.session_state.get(
             "selected_model", GPT_MODEL
         )
+        self.total_tokens       = 0
+        self.prompt_tokens      = 0
+        self.completion_tokens  = 0
+        self.total_requests     = 0
         print(f"Bot created with model: {self.model}")
 
     def chat(self, user_message: str) -> dict:
@@ -1186,6 +1190,10 @@ class StockChatbot:
 
             try:
                 print(f"Using model: {self.model}")
+                trimmed_history = self.history[-6:] \
+                    if len(self.history) > 6 \
+                    else self.history
+
                 response = self.client.chat.completions.create(
                     model       = self.model,
                     messages    = [
@@ -1193,23 +1201,54 @@ class StockChatbot:
                             "role":    "system",
                             "content": SYSTEM_PROMPT
                         }
-                    ] + self.history,
+                    ] + trimmed_history,
                     tools       = tools,
                     tool_choice = "auto",
                     temperature = TEMPERATURE,
                 )
+                if response.usage:
+                    self.prompt_tokens     += response.usage.prompt_tokens
+                    self.completion_tokens += response.usage.completion_tokens
+                    self.total_tokens      += response.usage.total_tokens
+                    self.total_requests    += 1
+                    print(f"  Request tokens    : {response.usage.prompt_tokens}")
+                    print(f"  Response tokens   : {response.usage.completion_tokens}")
+                    print(f"  Total this request: {response.usage.total_tokens}")
+                    print(f"  Session total     : {self.total_tokens}")
+                    print(f"  Session requests  : {self.total_requests}")
             except Exception as e:
                 error_msg = str(e)
                 if "rate limit" in error_msg.lower() or \
                    "too many requests" in error_msg.lower() or \
                    "429" in error_msg:
-                    print("Rate limited -- waiting 30 seconds...")
-                    time.sleep(30)
-                    continue
-                return {
-                    "type":    "error",
-                    "summary": f"API Error: {error_msg}"
-                }
+                    print(f"Rate limited after {self.total_tokens} tokens")
+                    print(f"Total requests this session: {self.total_requests}")
+                    return {
+                        "type": "error",
+                        "summary": (
+                            f"Rate limit reached after "
+                            f"{self.total_tokens:,} tokens and "
+                            f"{self.total_requests} requests this session. "
+                            f"Please wait 60 seconds or switch to a "
+                            f"mini model in the sidebar."
+                        )
+                    }
+                elif "insufficient_quota" in error_msg.lower() or \
+                     "exceeded" in error_msg.lower():
+                    return {
+                        "type": "error",
+                        "summary": (
+                            "Monthly quota exceeded. "
+                            "Please add credits at "
+                            "platform.openai.com/account/billing"
+                        )
+                    }
+                else:
+                    print(f"API Error: {error_msg}")
+                    return {
+                        "type":    "error",
+                        "summary": f"API Error: {error_msg}"
+                    }
 
             message = response.choices[0].message
 
@@ -1593,6 +1632,49 @@ def main():
 
         st.markdown("---")
 
+        # -- Token usage display ──────────────────────────────
+        st.markdown("#### Session Usage")
+        if st.session_state.bot is not None:
+            bot = st.session_state.bot
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(
+                    "Total tokens",
+                    f"{bot.total_tokens:,}"
+                )
+                st.metric(
+                    "Requests",
+                    bot.total_requests
+                )
+            with col2:
+                st.metric(
+                    "Prompt tokens",
+                    f"{bot.prompt_tokens:,}"
+                )
+                st.metric(
+                    "Response tokens",
+                    f"{bot.completion_tokens:,}"
+                )
+
+            if bot.total_tokens > 150000:
+                st.error(
+                    "⚠️ Approaching rate limit! "
+                    "Switch to a mini model or wait."
+                )
+            elif bot.total_tokens > 80000:
+                st.warning(
+                    "⚠️ High token usage this session. "
+                    "Consider switching to mini model."
+                )
+            else:
+                st.success("✅ Token usage normal")
+
+            cost = bot.total_tokens * 0.000005
+            st.caption(f"Estimated session cost: ~${cost:.4f}")
+        else:
+            st.caption("No session active yet.")
+
+        # -- Reset button is right below ──────────────────────
         if st.button("🔄 Reset Conversation",
                      use_container_width=True):
             st.session_state.bot         = None
@@ -1600,7 +1682,6 @@ def main():
             st.session_state.last_result = None
             st.rerun()
 
-        st.markdown("---")
         st.caption(
             "Powered by GPT + Yahoo Finance\n\n"
             "Technical analysis is not financial advice."
