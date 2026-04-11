@@ -192,16 +192,31 @@ def generate_risk_matrix(technical: int,
         })
 
     # ── 5. Insider Activity Risk ──────────────────────────────
-    insider       = breakdown.get("insider", {})
-    insider_score = insider.get("score", 50)
-    insider_dir   = insider.get("direction", "neutral")
-    n_10b5        = sum(
+    insider          = breakdown.get("insider", {})
+    insider_score    = insider.get("score", 50)
+    insider_dir      = insider.get("direction", "neutral")
+    is_scheduled     = insider.get("is_scheduled_only", False)
+    plan_ratio       = insider.get("plan_ratio", 0.0)
+    n_10b5           = sum(
         1 for t in insider.get("transactions", [])
         if t.get("likely_10b5_1")
     )
     total_txns = insider.get("transaction_count", 0)
 
-    if insider_score <= 25 and insider_dir == "bearish":
+    # 10b5-1 override: scheduled plan selling is not a bearish signal
+    if is_scheduled or plan_ratio >= 0.80:
+        pct_str = f"{int(plan_ratio * 100)}%" if plan_ratio > 0 else "100%"
+        risks.append({
+            "category": "Insider Activity",
+            "level":    "low",
+            "color":    "#00C853",
+            "signal":   (
+                f"Scheduled trading plans ({pct_str} of sales are 10b5-1) -- "
+                f"pre-registered wealth management, not a bearish signal. "
+                f"Score neutralised to {insider_score}/100."
+            )
+        })
+    elif insider_score <= 25 and insider_dir == "bearish":
         risks.append({
             "category": "Insider Activity",
             "level":    "high",
@@ -214,7 +229,7 @@ def generate_risk_matrix(technical: int,
             "category": "Insider Activity",
             "level":    "medium",
             "color":    "#FF9800",
-            "signal":   f"Net insider selling detected (score {insider_score}/100){flag} -- monitor for conviction signals."
+            "signal":   f"Net insider selling (score {insider_score}/100){flag} -- monitor for conviction signals."
         })
     else:
         flag = f" ({n_10b5} likely 10b5-1 routine sales)" if n_10b5 > 0 else ""
@@ -250,44 +265,66 @@ def generate_risk_matrix(technical: int,
                 "signal":   f"Beta {beta} -- volatility in line with or below market average."
             })
 
-    # ── 7. Analyst Consensus Risk ─────────────────────────────
+    # ── 7. Analyst Consensus Risk — split into Direction + Dispersion ────
+    # Direction consensus and target price dispersion are two independent
+    # signals. High dispersion often reflects different time horizons among
+    # analysts, not disagreement on direction. Show them separately.
     analyst       = breakdown.get("analyst", {})
     analyst_score = analyst.get("score", 50)
+    analyst_dir   = analyst.get("direction", "neutral")
+    summary       = analyst.get("summary", {})
     targets       = analyst.get("targets", {})
     t_high        = targets.get("high")
     t_low         = targets.get("low")
     t_mean        = targets.get("mean")
 
+    sb    = summary.get("strong_buy", 0)
+    b     = summary.get("buy",        0)
+    h     = summary.get("hold",       0)
+    s     = summary.get("sell",       0)
+    ss    = summary.get("strong_sell",0)
+    total_ratings = sb + b + h + s + ss
+    bull_pct = round((sb + b) / total_ratings * 100) if total_ratings > 0 else None
+
+    # A. Direction consensus
+    if bull_pct is not None:
+        if bull_pct >= 80:
+            risks.append({"category": "Analyst Direction", "level": "low",
+                "color": "#00C853",
+                "signal": f"Direction consensus: {bull_pct}% of {total_ratings} analysts bullish -- strong agreement ✅"})
+        elif bull_pct >= 60:
+            risks.append({"category": "Analyst Direction", "level": "low",
+                "color": "#69F0AE",
+                "signal": f"Direction consensus: {bull_pct}% of {total_ratings} analysts bullish ✅"})
+        elif bull_pct >= 40:
+            risks.append({"category": "Analyst Direction", "level": "medium",
+                "color": "#FF9800",
+                "signal": f"Direction consensus: {bull_pct}% of {total_ratings} analysts bullish -- divided ⚠️"})
+        else:
+            risks.append({"category": "Analyst Direction", "level": "high",
+                "color": "#FF1744",
+                "signal": f"Direction consensus: only {bull_pct}% of {total_ratings} analysts bullish ⚠️"})
+    elif analyst_score < 40:
+        risks.append({"category": "Analyst Direction", "level": "medium",
+            "color": "#FF9800",
+            "signal": f"Analyst sentiment weak (score {analyst_score}/100) -- limited buy-side conviction ⚠️"})
+
+    # B. Target price dispersion (separate entry)
     if t_high and t_low and t_mean and t_mean > 0:
         dispersion = round((t_high - t_low) / t_mean * 100, 1)
         if dispersion > 60:
-            risks.append({
-                "category": "Analyst Consensus",
-                "level":    "high",
-                "color":    "#FF1744",
-                "signal":   f"Target price dispersion {dispersion}% (${t_low}-${t_high}) -- analysts deeply disagree on outlook."
-            })
+            risks.append({"category": "Analyst Target Dispersion", "level": "medium",
+                "color": "#FF9800",
+                "signal": (f"Target range: ${t_low}–${t_high} (dispersion {dispersion}%) -- "
+                           f"wide range reflects different time horizons, not necessarily direction disagreement.")})
         elif dispersion > 30:
-            risks.append({
-                "category": "Analyst Consensus",
-                "level":    "medium",
-                "color":    "#FF9800",
-                "signal":   f"Target price dispersion {dispersion}% (${t_low}-${t_high}) -- meaningful uncertainty in analyst forecasts."
-            })
+            risks.append({"category": "Analyst Target Dispersion", "level": "low",
+                "color": "#69F0AE",
+                "signal": f"Target range: ${t_low}–${t_high} (dispersion {dispersion}%) -- moderate spread ➡️"})
         else:
-            risks.append({
-                "category": "Analyst Consensus",
-                "level":    "low",
-                "color":    "#00C853",
-                "signal":   f"Target price dispersion {dispersion}% (${t_low}-${t_high}) -- analysts broadly aligned."
-            })
-    elif analyst_score < 40:
-        risks.append({
-            "category": "Analyst Consensus",
-            "level":    "medium",
-            "color":    "#FF9800",
-            "signal":   f"Analyst sentiment weak (score {analyst_score}/100) -- limited buy-side conviction."
-        })
+            risks.append({"category": "Analyst Target Dispersion", "level": "low",
+                "color": "#00C853",
+                "signal": f"Target range: ${t_low}–${t_high} (dispersion {dispersion}%) -- analysts tightly aligned ✅"})
 
     # ── 8. Macro Environment Risk (new) ──────────────────────
     if macro is not None:
@@ -358,7 +395,8 @@ def get_composite(technical: int,
                   macro=None,
                   event=None,
                   fund_data: dict = None,
-                  sentiment_data: dict = None) -> dict:
+                  sentiment_data: dict = None,
+                  short_term: int = None) -> dict:
     """
     Combines all dimension scores into one composite investment
     score with quadrant decision label and risk matrix.
@@ -370,13 +408,15 @@ def get_composite(technical: int,
         macro          : Macro score (0-100) or None
         fund_data      : Raw fundamental data dict (for risk matrix)
         sentiment_data : Full sentiment result dict (for risk matrix)
+        short_term     : Short-term technical score (0-100) or None.
+                         When < 40, overrides Strong Buy to Cautious Buy.
 
     Returns dict with:
         score        : Composite score (0-100)
         verdict      : Trend label
         color        : Hex color for UI
         quadrant     : Decision label
-        action       : Explanation text
+        action       : Explanation text (timing-aware)
         q_color      : Quadrant hex color
         q_icon       : Quadrant emoji
         weight_label : Active weights used (for UI display)

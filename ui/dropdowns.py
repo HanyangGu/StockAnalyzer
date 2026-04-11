@@ -7,6 +7,7 @@
 #   render_sentiment_dropdown   : analyst + insider + options + news
 # ============================================================
 
+import math
 import streamlit as st
 from ui.components import get_score_color
 
@@ -230,7 +231,8 @@ def render_sentiment_dropdown(data: dict):
     insider   = breakdown.get("insider", {})
     options   = breakdown.get("options", {})
     articles  = news.get("articles",      [])
-    txns      = insider.get("transactions", [])
+    # UI shows all transactions; "transactions" = GPT-filtered, "all_transactions" = full list
+    txns      = insider.get("all_transactions") or insider.get("transactions", [])
 
     if not sent:
         return
@@ -333,7 +335,7 @@ def render_sentiment_dropdown(data: dict):
                     "Title"     : t.get("title", ""),
                     "Type"      : t.get("transaction_type", "") + plan_tag,
                     "Shares"    : f"{shares:,}" if shares else "N/A",
-                    "Value"     : f"USD {value:,.0f}" if value else "N/A",
+                    "Value"     : (f"USD {value:,.0f}" if (value and not (isinstance(value, float) and math.isnan(value))) else "N/A"),
                     "Holdings%" : ownership_str,
                     "Date"      : t.get("date_str", ""),
                     "Signal"    : f"{signal} ({strength})",

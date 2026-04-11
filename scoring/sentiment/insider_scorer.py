@@ -150,8 +150,9 @@ def score_insider(data: dict, ticker: str = "") -> dict:
     Returns:
         Scored sentiment dict (see module docstring for contract).
     """
-    transactions = data.get("transactions", [])
-    data_quality = data.get("data_quality", "failed")
+    transactions     = data.get("transactions", [])      # GPT-filtered high-signal subset
+    all_transactions = data.get("all_transactions") or transactions  # full list for count display
+    data_quality     = data.get("data_quality", "failed")
 
     if not transactions or data_quality in ("failed", "insufficient"):
         msg = (
@@ -182,9 +183,40 @@ def score_insider(data: dict, ticker: str = "") -> dict:
             "reason":        j.get("reason",        ""),
         })
 
+    # ── 10b5-1 Neutral Override ───────────────────────────────
+    # When ≥80% of all sell transactions are 10b5-1 scheduled plans
+    # AND there are no open-market buyers, the signal has no value.
+    sellers_all   = [t for t in enriched if t["is_sell"]]
+    buyers_all    = [t for t in enriched if t["is_buy"]]
+    n_10b5_total  = sum(1 for t in sellers_all if t.get("likely_10b5_1"))
+    plan_ratio    = n_10b5_total / len(sellers_all) if sellers_all else 0.0
+
+    if plan_ratio >= 0.80 and not buyers_all:
+        n_sellers_display = len(set(t["insider"] for t in sellers_all))
+        signals = [
+            f"Insider activity: 0 buyer(s), {n_sellers_display} seller(s) "
+            f"of {len(enriched)} total transactions",
+            f"📋 Scheduled trading plans: {n_10b5_total}/{len(sellers_all)} sale(s) "
+            f"flagged as 10b5-1 ({int(plan_ratio*100)}%) -- "
+            f"pre-registered wealth management, not a bearish signal ➡️",
+            "Adjusted value flow: no open-market purchases vs plan-only sales "
+            "-- signal not meaningful ➡️",
+            "Overall insider tone: neutral ➡️",
+        ]
+        return {
+            "score":             50,
+            "direction":         "neutral",
+            "is_scheduled_only": True,
+            "plan_ratio":        round(plan_ratio, 2),
+            "cluster_bonus":     0,
+            "transaction_count": n_all,
+            "transactions":      enriched,
+            "signals":           signals,
+        }
+
     # ── Scoring ───────────────────────────────────────────────
-    buyers  = [t for t in enriched if t["is_buy"]]
-    sellers = [t for t in enriched if t["is_sell"]]
+    buyers  = buyers_all
+    sellers = sellers_all
 
     def _sell_weight(t: dict) -> float:
         """10b5-1 sales downweighted × 0.3; non-10b5-1 retain full weight."""
@@ -220,10 +252,39 @@ def score_insider(data: dict, ticker: str = "") -> dict:
     else:
         pos_score = 0
 
-    # 5. Baseline
+    # 5. Cluster effect bonus
+    # Multiple senior executives buying within 7 days = coordinated confidence.
+    cluster_bonus  = 0
+    cluster_signal = None
+    if buyers:
+        senior_keys    = {"ceo", "cfo", "coo", "president", "chairman"}
+        senior_buyers  = [t for t in buyers if t.get("position_key") in senior_keys]
+        if len(senior_buyers) >= 2:
+            dates     = [t.get("date_ts") for t in senior_buyers if t.get("date_ts") is not None]
+            clustered = False
+            for i in range(len(dates)):
+                for j in range(i + 1, len(dates)):
+                    try:
+                        if abs((dates[i] - dates[j]).days) <= 7:
+                            clustered = True
+                            break
+                    except Exception:
+                        pass
+                if clustered:
+                    break
+            if clustered:
+                titles         = [t["title"] for t in senior_buyers]
+                cluster_bonus  = 15
+                cluster_signal = (
+                    f"Cluster buy signal: {len(senior_buyers)} senior executives "
+                    f"({', '.join(titles[:3])}) bought within 7 days -- "
+                    f"strong coordinated confidence, +{cluster_bonus}pts ✅"
+                )
+
+    # 6. Baseline
     baseline    = 10
     final_score = max(0, min(100,
-        ratio_score + count_score + size_score + pos_score + baseline
+        ratio_score + count_score + size_score + pos_score + cluster_bonus + baseline
     ))
     direction = (
         "bullish" if final_score >= 60 else
@@ -236,14 +297,18 @@ def score_insider(data: dict, ticker: str = "") -> dict:
     n_10b5_sellers = sum(1 for t in sellers if t.get("likely_10b5_1"))
 
     signals = []
+    n_all    = len(all_transactions)
+    n_scored = len(enriched)
+    filter_note = (f" ({n_all - n_scored} low-signal filtered, {n_scored} analysed)"
+                   if n_all > n_scored else "")
     signals.append(
         f"Insider activity: {n_buyers} buyer(s), {n_sellers_all} seller(s) "
-        f"of {len(enriched)} total transactions"
+        f"of {n_all} total transactions{filter_note}"
     )
     if n_10b5_sellers > 0:
         signals.append(
-            f"10b5-1 plan sales detected: {n_10b5_sellers} sale(s) flagged as likely "
-            f"scheduled trading plan -- downweighted in scoring ➡️"
+            f"📋 10b5-1 plan sales: {n_10b5_sellers} sale(s) flagged as scheduled "
+            f"trading plan -- downweighted ×0.3 in scoring ➡️"
         )
     if buy_value > 0 or sell_value > 0:
         net_dir = "net buying" if buy_value > sell_value else "net selling"
@@ -265,6 +330,8 @@ def score_insider(data: dict, ticker: str = "") -> dict:
             f"Top purchase: {tb['insider']} ({tb['title']}) "
             f"-- USD {tb['value']:,.0f}{ownership_str} ✅"
         )
+    if cluster_signal:
+        signals.append(cluster_signal)
     icon = "✅" if direction == "bullish" else ("⚠️" if direction == "bearish" else "➡️")
     signals.append(f"Overall insider tone: {direction} {icon}")
 
@@ -274,7 +341,7 @@ def score_insider(data: dict, ticker: str = "") -> dict:
         "is_scheduled_only": False,
         "plan_ratio":        round(plan_ratio, 2),
         "cluster_bonus":     cluster_bonus,
-        "transaction_count": len(enriched),
+        "transaction_count": n_all,
         "transactions":      enriched,
         "signals":           signals,
     }

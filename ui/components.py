@@ -211,11 +211,17 @@ def render_decision_panel(data: dict):
     macro_data = data.get("macro")
     mac_score  = macro_data.get("score") if macro_data else None
 
+    # Pass full data so Risk Matrix and Cautious Buy override work correctly
+    short_term_score = data.get("short_term", {}).get("score")
     comp = get_composite(
-        technical   = tech_score,
-        fundamental = fund_score,
-        sentiment   = sent_score,
-        macro       = mac_score,
+        technical      = tech_score,
+        fundamental    = fund_score,
+        sentiment      = sent_score,
+        macro          = mac_score,
+        event          = data.get("event"),
+        fund_data      = data.get("fund_details", {}),
+        sentiment_data = data.get("sentiment", {}),
+        short_term     = short_term_score,
     )
 
     st.markdown("---")

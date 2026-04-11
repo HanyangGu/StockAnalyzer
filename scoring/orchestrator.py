@@ -1,20 +1,19 @@
 # ============================================================
 # orchestrator.py -- Master Analysis Orchestrator
 # ============================================================
-# Coordinates the full analysis pipeline for a single stock:
-#   1. Resolve ticker
-#   2. Fetch price data (live or historical)
-#   3. Fetch historical OHLCV data
-#   4. Run all analyzer modules
-#   5. Run all scorer modules
-#   6. Return complete serializable result
+# v0.6: DataBundle architecture.
 #
-# To add a new analysis dimension:
-#   1. Add analyzer in analyzers/           (data layer)
-#   2. Add scorer in scoring/              (scoring layer)
-#   3. Call both here in sequence
-#   4. Include result in the return dict
-#   5. Update composite.py weights
+# All yfinance data is fetched ONCE at the top via fetch_raw_bundle().
+# Analyzers receive the bundle and extract their data from it.
+# HTTP requests reduced from ~18-20 to ~8 per analysis.
+#
+# Data flow:
+#   1. resolve_ticker()
+#   2. fetch_raw_bundle()      ← single pass, all endpoints
+#   3. build_price_data()      ← extracted from bundle.info
+#   4. All analyzers receive bundle → extract their slice
+#   5. All scorers run on extracted data (unchanged)
+#   6. Composite + return
 # ============================================================
 
 import time
@@ -22,6 +21,7 @@ import numpy as np
 from datetime import datetime
 
 from core.data import (
+    fetch_raw_bundle,
     fetch_price_data,
     fetch_price_data_historical,
     fetch_historical_data,
@@ -34,32 +34,26 @@ from analyzers.technical import (
     compute_moving_averages, compute_golden_cross,
     compute_bollinger_bands, compute_atr, compute_volume_trend,
 )
-from analyzers.fundamental import fetch_fundamental_data
-from analyzers.macro import fetch_macro_data
-
-# Sentiment: data layer
+from analyzers.fundamental  import fetch_fundamental_data
+from analyzers.macro        import fetch_macro_data
 from analyzers.sentiment.news    import fetch_news_data
 from analyzers.sentiment.analyst import fetch_analyst_data
 from analyzers.sentiment.insider import fetch_insider_data
 from analyzers.sentiment.options import fetch_options_data
+from analyzers.event_driven      import fetch_event_data
 
 from scoring.technical_scorer   import (
     score_short_term, score_mid_term, score_long_term, score_technical_overall,
 )
-from scoring.fundamental_scorer import score_fundamentals
-from scoring.macro_scorer       import score_macro
-
-# Sentiment: scoring layer
+from scoring.fundamental_scorer  import score_fundamentals
+from scoring.macro_scorer        import score_macro
 from scoring.sentiment.news_scorer    import score_news
 from scoring.sentiment.analyst_scorer import score_analyst
 from scoring.sentiment.insider_scorer import score_insider
 from scoring.sentiment.options_scorer import score_options
-
-from scoring.sentiment_scorer import score_sentiment
-from scoring.composite        import get_composite
-
-from analyzers.event_driven import fetch_event_data
-from scoring.event_scorer   import score_event
+from scoring.sentiment_scorer    import score_sentiment
+from scoring.composite           import get_composite
+from scoring.event_scorer        import score_event
 
 
 # ============================================================
@@ -80,13 +74,76 @@ def make_serializable(obj, _path="root"):
     elif hasattr(obj, 'isoformat'):
         return obj.isoformat()
     else:
-        # Debug: print any non-serializable type
         try:
             import json
             json.dumps(obj)
         except TypeError:
             print(f"  ⚠️ Non-serializable at {_path}: type={type(obj).__name__}, value={repr(obj)[:100]}")
         return obj
+
+
+def _build_price_data(ticker: str, bundle: dict,
+                      backtest_date: str = None) -> dict:
+    """
+    Constructs the price_data dict from bundle.info.
+    Mirrors the output contract of fetch_price_data().
+    """
+    info    = bundle.get("info", {})
+    history = bundle.get("history")
+
+    current_price = (
+        info.get("currentPrice") or
+        info.get("regularMarketPrice")
+    )
+
+    # Backtest: override current_price with historical close
+    if backtest_date and history is not None and not history.empty:
+        current_price = round(float(history["Close"].iloc[-1]), 2)
+        prev_price    = round(float(history["Close"].iloc[-2]), 2) if len(history) > 1 else current_price
+    else:
+        prev_price = info.get("previousClose", 0) or 0
+
+    if not current_price:
+        return {"error": f"Could not retrieve price data for '{ticker}'."}
+
+    current_price    = round(float(current_price), 2)
+    price_change     = round(current_price - float(prev_price), 2)
+    price_change_pct = round(
+        (price_change / float(prev_price) * 100) if prev_price else 0, 2
+    )
+
+    # Recent closes from intraday (live) or history (backtest)
+    intraday = bundle.get("intraday")
+    if intraday is not None and not intraday.empty:
+        recent_closes = intraday["Close"].tail(5).round(2).tolist()
+    elif history is not None and not history.empty:
+        recent_closes = history["Close"].tail(5).round(2).tolist()
+    else:
+        recent_closes = []
+
+    return {
+        "ticker":            ticker,
+        "name":              info.get("longName", ticker),
+        "exchange":          info.get("exchange"),
+        "sector":            info.get("sector"),
+        "industry":          info.get("industry"),
+        "currency":          info.get("currency", "USD"),
+        "current_price":     current_price,
+        "prev_close":        round(float(prev_price), 2),
+        "price_change":      price_change,
+        "price_change_pct":  price_change_pct,
+        "open":              info.get("open"),
+        "day_high":          info.get("dayHigh"),
+        "day_low":           info.get("dayLow"),
+        "recent_closes":     recent_closes,
+        "volume":            info.get("volume"),
+        "avg_volume":        info.get("averageVolume"),
+        "market_cap":        info.get("marketCap"),
+        "pe_ratio":          info.get("trailingPE"),
+        "52w_high":          info.get("fiftyTwoWeekHigh"),
+        "52w_low":           info.get("fiftyTwoWeekLow"),
+        "timestamp":         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 # ============================================================
@@ -97,42 +154,34 @@ def run_analysis(company: str, backtest_date: str = None) -> dict:
     """
     Runs full multi-dimension analysis on a stock.
 
-    Data flow per dimension:
-      analyzer (data layer) → scorer (scoring layer) → result dict
-
-    All analyzer outputs are standardised dicts independent of the
-    data source. Replacing a data source = replace only the analyzer.
+    v0.6 change: all yfinance data is fetched once via
+    fetch_raw_bundle() and passed to each analyzer.
     """
     # ── Step 1: Resolve ticker ────────────────────────────────
     ticker = resolve_ticker(company)
-    print(f"  Running analysis for: {ticker}...")
+    print(f"\n  ▶ run_analysis({ticker}) backtest={backtest_date or 'live'}")
 
-    # ── Step 2: Fetch price data ──────────────────────────────
-    if backtest_date:
-        price_data = fetch_price_data_historical(ticker, backtest_date)
-    else:
-        price_data = fetch_price_data(ticker)
+    # ── Step 2: Fetch ALL data in one bundle ──────────────────
+    bundle = fetch_raw_bundle(ticker, end_date=backtest_date)
 
-    if "error" in price_data:
-        if "too many requests" in str(price_data["error"]).lower() or \
-           "rate limit"        in str(price_data["error"]).lower():
+    if bundle.get("data_quality") == "failed" or bundle.get("history") is None:
+        err = bundle.get("fetch_errors", {}).get("history", "No data available")
+        # Check for rate limit
+        if "too many requests" in str(err).lower() or "rate limit" in str(err).lower():
             return {"error": "Yahoo Finance is temporarily rate limited. Please wait 30 seconds and try again."}
+        return {"error": f"Could not fetch data for {ticker}: {err}"}
+
+    # ── Step 3: Build price data from bundle ──────────────────
+    price_data = _build_price_data(ticker, bundle, backtest_date)
+    if "error" in price_data:
         return {"error": price_data["error"]}
 
-    # ── Step 3: Fetch historical OHLCV ────────────────────────
-    time.sleep(1)
-    hist_data = fetch_historical_data(ticker, end_date=backtest_date)
-    if not hist_data["success"]:
-        if "too many requests" in str(hist_data["error"]).lower() or \
-           "rate limit"        in str(hist_data["error"]).lower():
-            return {"error": "Yahoo Finance is temporarily rate limited. Please wait 30 seconds and try again."}
-        return {"error": hist_data["error"]}
-
-    df            = hist_data["df"]
-    closes        = hist_data["closes"]
+    # ── Step 4: Technical indicators (from bundle.history) ────
+    history = bundle["history"]
+    df      = history
+    closes  = history["Close"]
     current_price = price_data["current_price"]
 
-    # ── Step 4: Technical indicators ─────────────────────────
     rsi    = compute_rsi(closes)
     stoch  = compute_stochastic(df)
     roc    = compute_roc(closes)
@@ -143,14 +192,14 @@ def run_analysis(company: str, backtest_date: str = None) -> dict:
     atr    = compute_atr(df)
     vol    = compute_volume_trend(df)
 
-    # ── Step 5: Technical scoring ────────────────────────────
+    # ── Step 5: Technical scoring ─────────────────────────────
     short   = score_short_term(rsi, stoch, roc, bb, mas)
     mid     = score_mid_term(macd, mas, atr, vol)
     long    = score_long_term(mas, golden, vol)
     overall = score_technical_overall(short, mid, long)
 
-    # ── Step 6: Fundamental (data → score) ───────────────────
-    fund_data = fetch_fundamental_data(ticker)
+    # ── Step 6: Fundamental ───────────────────────────────────
+    fund_data = fetch_fundamental_data(ticker, bundle=bundle)
     if "error" in fund_data:
         fundamental  = {"score": None, "verdict": "Data unavailable", "icon": "➡️", "signals": []}
         fund_details = {}
@@ -182,21 +231,20 @@ def run_analysis(company: str, backtest_date: str = None) -> dict:
             },
         }
 
-    # ── Step 7: Sentiment (data → score, per sub-dimension) ──
-    # Each sub-dimension: fetch data → score independently
-    # score_sentiment() aggregates the four scored sub-dicts
+    # ── Step 7: Sentiment (all from bundle) ───────────────────
+    company_name = price_data.get("name", "")
 
-    news_raw     = fetch_news_data(ticker, company_name=price_data.get("name", ""))
-    news_scored  = score_news(news_raw, ticker=ticker, company_name=price_data.get("name", ""))
+    news_raw     = fetch_news_data(ticker, company_name=company_name, bundle=bundle)
+    news_scored  = score_news(news_raw, ticker=ticker, company_name=company_name)
 
-    analyst_raw     = fetch_analyst_data(ticker)
-    analyst_scored  = score_analyst(analyst_raw)
+    analyst_raw    = fetch_analyst_data(ticker, bundle=bundle)
+    analyst_scored = score_analyst(analyst_raw)
 
-    insider_raw     = fetch_insider_data(ticker)
-    insider_scored  = score_insider(insider_raw, ticker=ticker)
+    insider_raw    = fetch_insider_data(ticker, bundle=bundle)
+    insider_scored = score_insider(insider_raw, ticker=ticker)
 
-    options_raw     = fetch_options_data(ticker)
-    options_scored  = score_options(options_raw)
+    options_raw    = fetch_options_data(ticker, bundle=bundle)
+    options_scored = score_options(options_raw)
 
     sentiment = score_sentiment(
         news    = news_scored,
@@ -205,11 +253,9 @@ def run_analysis(company: str, backtest_date: str = None) -> dict:
         options = options_scored,
     )
 
-    # ── Step 8: Macro (data → score) ─────────────────────────
-    # Live-only: historical macro data via yfinance unreliable for backtest
+    # ── Step 8: Macro (batch yf.download, always separate) ────
     macro_result = None
     if MACRO_ENABLED and not backtest_date:
-        print("  Fetching macro data...")
         raw_macro    = fetch_macro_data()
         macro_result = score_macro(
             macro_data = raw_macro,
@@ -221,14 +267,11 @@ def run_analysis(company: str, backtest_date: str = None) -> dict:
     elif backtest_date:
         print("  Macro dimension skipped in backtest mode")
 
-    # ── Step 8b: Event-Driven (data → reliability) ──────────
-    # Always run regardless of backtest mode.
-    # In backtest mode, date context still applies to the analysis date.
-    print("  Fetching event data...")
-    event_raw    = fetch_event_data(ticker)
+    # ── Step 8b: Event-Driven (from bundle) ───────────────────
+    event_raw    = fetch_event_data(ticker, bundle=bundle)
     event_result = score_event(event_raw)
 
-    # ── Step 9: Composite ────────────────────────────────────
+    # ── Step 9: Composite ─────────────────────────────────────
     composite = get_composite(
         technical      = overall["score"],
         fundamental    = fundamental["score"],
@@ -244,11 +287,11 @@ def run_analysis(company: str, backtest_date: str = None) -> dict:
     result = {
         "ticker":           ticker,
         "company":          price_data["name"],
-        "sector":           fund_data.get("sector") if "error" not in fund_data else None,
         "current_price":    current_price,
         "price_change":     price_data["price_change"],
         "price_change_pct": price_data["price_change_pct"],
         "backtest_date":    backtest_date or "live",
+        "sector":           fund_data.get("sector") if "error" not in fund_data else None,
 
         "short_term":       short,
         "mid_term":         mid,

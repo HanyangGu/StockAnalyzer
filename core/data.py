@@ -322,3 +322,214 @@ def fetch_historical_data(ticker_symbol: str,
                 )
             }
         return {"success": False, "error": error_msg}
+
+
+# ============================================================
+# Raw Data Bundle (v0.6 — single-fetch architecture)
+# ============================================================
+
+def fetch_raw_bundle(ticker_symbol: str,
+                     end_date: str = None) -> dict:
+    """
+    Fetches ALL data needed for a full analysis in one pass.
+
+    Creates a single yf.Ticker object and calls every endpoint
+    once. All analyzers then read from this bundle instead of
+    making their own network requests.
+
+    HTTP requests: ~8 total (down from 18-20 per analysis)
+      1. ticker.info              (price + fundamentals + metadata)
+      2. ticker.history 1y        (OHLCV for technical indicators)
+      3. ticker.history 1d 1m     (intraday for price display, live only)
+      4. ticker.upgrades_downgrades (analyst ratings history)
+      5. ticker.recommendations_summary (analyst distribution)
+      6. ticker.analyst_price_targets   (price targets)
+      7. ticker.insider_transactions    (insider activity)
+      8. ticker.options + option_chain  (one chain, counts as 2)
+      9. ticker.news                    (news feed)
+     10. ticker.calendar                (next earnings)
+     11. ticker.earnings_dates          (historical earnings)
+     Macro: 4 separate tickers (VIX/TNX/IRX/GSPC) — always separate
+
+    Args:
+        ticker_symbol : validated ticker (e.g. "NVDA")
+        end_date      : backtest date string "YYYY-MM-DD" or None for live
+
+    Returns:
+        dict with keys:
+          "info"                    : dict   (ticker.info)
+          "history"                 : DataFrame (1y daily OHLCV)
+          "intraday"                : DataFrame | None (1d 1m, live only)
+          "upgrades_downgrades"     : DataFrame | None
+          "recommendations_summary" : DataFrame | None
+          "analyst_price_targets"   : dict | None
+          "insider_transactions"    : DataFrame | None
+          "options_expiries"        : tuple | None
+          "option_chain"            : OptionChain | None
+          "selected_expiry"         : str | None
+          "news"                    : list
+          "calendar"                : dict | DataFrame | None
+          "earnings_dates"          : DataFrame | None
+          "fetch_errors"            : dict   {field: error_msg}
+          "data_quality"            : str    "full"|"partial"|"failed"
+    """
+    import pandas as pd
+
+    print(f"  [Bundle] Fetching all data for {ticker_symbol} in one pass...")
+    t_start = time.time()
+
+    bundle       = {}
+    fetch_errors = {}
+
+    # ── Single Ticker object ───────────────────────────────────
+    try:
+        stock = yf.Ticker(ticker_symbol)
+    except Exception as e:
+        return {
+            "info": {}, "history": None, "intraday": None,
+            "upgrades_downgrades": None, "recommendations_summary": None,
+            "analyst_price_targets": None, "insider_transactions": None,
+            "options_expiries": None, "option_chain": None,
+            "selected_expiry": None, "news": [], "calendar": None,
+            "earnings_dates": None, "fetch_errors": {"ticker": str(e)},
+            "data_quality": "failed",
+        }
+
+    # ── 1. info (price + fundamentals + metadata) ─────────────
+    try:
+        bundle["info"] = stock.info or {}
+    except Exception as e:
+        bundle["info"] = {}
+        fetch_errors["info"] = str(e)
+
+    # ── 2. OHLCV history ──────────────────────────────────────
+    try:
+        if end_date:
+            end   = pd.Timestamp(end_date)
+            start = end - pd.DateOffset(years=1)
+            bundle["history"] = stock.history(
+                start    = start.strftime("%Y-%m-%d"),
+                end      = end.strftime("%Y-%m-%d"),
+                interval = DATA_INTERVAL,
+            )
+        else:
+            bundle["history"] = stock.history(
+                period   = DATA_PERIOD,
+                interval = DATA_INTERVAL,
+            )
+        if bundle["history"].empty:
+            bundle["history"] = None
+            fetch_errors["history"] = "Empty DataFrame returned"
+    except Exception as e:
+        bundle["history"] = None
+        fetch_errors["history"] = str(e)
+
+    # ── 3. Intraday (live only, for recent_closes display) ────
+    bundle["intraday"] = None
+    if not end_date:
+        try:
+            bundle["intraday"] = stock.history(period="1d", interval="1m")
+        except Exception as e:
+            fetch_errors["intraday"] = str(e)
+
+    # ── 4. Analyst ratings history ────────────────────────────
+    try:
+        raw = getattr(stock, "upgrades_downgrades", None)
+        if raw is None or (hasattr(raw, "empty") and raw.empty):
+            raw = getattr(stock, "recommendations", None)
+        bundle["upgrades_downgrades"] = raw
+    except Exception as e:
+        bundle["upgrades_downgrades"] = None
+        fetch_errors["upgrades_downgrades"] = str(e)
+
+    # ── 5. Analyst summary (distribution counts) ─────────────
+    try:
+        bundle["recommendations_summary"] = stock.recommendations_summary
+    except Exception as e:
+        bundle["recommendations_summary"] = None
+        fetch_errors["recommendations_summary"] = str(e)
+
+    # ── 6. Analyst price targets ──────────────────────────────
+    try:
+        raw = stock.analyst_price_targets
+        if raw is not None and hasattr(raw, "to_dict"):
+            raw = raw.to_dict()
+        bundle["analyst_price_targets"] = raw
+    except Exception as e:
+        bundle["analyst_price_targets"] = None
+        fetch_errors["analyst_price_targets"] = str(e)
+
+    # ── 7. Insider transactions ───────────────────────────────
+    try:
+        bundle["insider_transactions"] = stock.insider_transactions
+    except Exception as e:
+        bundle["insider_transactions"] = None
+        fetch_errors["insider_transactions"] = str(e)
+
+    # ── 8. Options chain ──────────────────────────────────────
+    bundle["options_expiries"] = None
+    bundle["option_chain"]     = None
+    bundle["selected_expiry"]  = None
+    try:
+        expiries = stock.options
+        bundle["options_expiries"] = expiries
+
+        if expiries:
+            from datetime import timezone
+            now      = datetime.now(timezone.utc)
+            selected = None
+            for exp in expiries:
+                exp_dt = pd.Timestamp(exp, tz="UTC")
+                dte    = (exp_dt - now).days
+                if 20 <= dte <= 90:
+                    selected = exp
+                    break
+            if not selected:
+                selected = expiries[0]
+
+            bundle["selected_expiry"] = selected
+            bundle["option_chain"]    = stock.option_chain(selected)
+    except Exception as e:
+        fetch_errors["options"] = str(e)
+
+    # ── 9. News feed ──────────────────────────────────────────
+    try:
+        bundle["news"] = stock.news or []
+    except Exception as e:
+        bundle["news"] = []
+        fetch_errors["news"] = str(e)
+
+    # ── 10. Earnings calendar ─────────────────────────────────
+    try:
+        bundle["calendar"] = stock.calendar
+    except Exception as e:
+        bundle["calendar"] = None
+        fetch_errors["calendar"] = str(e)
+
+    # ── 11. Historical earnings dates ─────────────────────────
+    try:
+        bundle["earnings_dates"] = stock.earnings_dates
+    except Exception as e:
+        bundle["earnings_dates"] = None
+        fetch_errors["earnings_dates"] = str(e)
+
+    # ── Data quality assessment ───────────────────────────────
+    critical_ok = (
+        bundle["info"] and
+        bundle["history"] is not None and
+        not bundle["history"].empty
+    )
+    if not critical_ok:
+        data_quality = "failed"
+    elif fetch_errors:
+        data_quality = "partial"
+    else:
+        data_quality = "full"
+
+    bundle["fetch_errors"] = fetch_errors
+    bundle["data_quality"] = data_quality
+
+    elapsed = round(time.time() - t_start, 1)
+    print(f"  [Bundle] Done in {elapsed}s | quality={data_quality} | errors={list(fetch_errors.keys()) or 'none'}")
+
+    return bundle
