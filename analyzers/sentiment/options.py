@@ -21,24 +21,49 @@ def fetch_options_data(ticker_symbol: str,
     """
     print(f"  Parsing options data for {ticker_symbol}...")
 
+    import time, yfinance as yf
+
     if bundle is not None:
-        info           = bundle.get("info", {})
-        chain          = bundle.get("option_chain")
-        selected       = bundle.get("selected_expiry")
-        expiries       = bundle.get("options_expiries") or ()
-        current_price  = (
+        info          = bundle.get("info", {})
+        chain         = bundle.get("option_chain")
+        selected      = bundle.get("selected_expiry")
+        current_price = (
             info.get("currentPrice") or
             info.get("regularMarketPrice") or
             info.get("previousClose")
         )
 
         if chain is None or selected is None:
-            return {"data_quality": "failed"}
-
-        now     = datetime.now(timezone.utc)
-        dte_val = max(1, (pd.Timestamp(selected, tz="UTC") - now).days)
+            # Bundle fetch failed for options — retry directly
+            print(f"  Options not in bundle, retrying direct fetch for {ticker_symbol}...")
+            try:
+                time.sleep(0.5)
+                stock    = yf.Ticker(ticker_symbol)
+                expiries = stock.options
+                if not expiries:
+                    return {"data_quality": "failed"}
+                now      = datetime.now(timezone.utc)
+                selected = None
+                dte_val  = None
+                for exp in expiries:
+                    exp_dt = pd.Timestamp(exp, tz="UTC")
+                    dte    = (exp_dt - now).days
+                    if MIN_DTE <= dte <= MAX_DTE:
+                        selected = exp
+                        dte_val  = dte
+                        break
+                if not selected:
+                    selected = expiries[0]
+                    dte_val  = max(1, (pd.Timestamp(selected, tz="UTC") - now).days)
+                chain = stock.option_chain(selected)
+                print(f"  Options retry succeeded: {selected}")
+            except Exception as e:
+                print(f"  Options retry failed: {e}")
+                return {"data_quality": "failed"}
+        else:
+            now     = datetime.now(timezone.utc)
+            dte_val = max(1, (pd.Timestamp(selected, tz="UTC") - now).days)
     else:
-        import time, yfinance as yf
         try:
             time.sleep(1)
             stock    = yf.Ticker(ticker_symbol)
