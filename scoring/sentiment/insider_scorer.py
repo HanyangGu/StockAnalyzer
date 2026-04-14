@@ -209,7 +209,7 @@ def score_insider(data: dict, ticker: str = "") -> dict:
             "is_scheduled_only": True,
             "plan_ratio":        round(plan_ratio, 2),
             "cluster_bonus":     0,
-            "transaction_count": n_all,
+            "transaction_count": len(all_transactions),
             "transactions":      enriched,
             "signals":           signals,
         }
