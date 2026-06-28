@@ -1,5 +1,7 @@
 # AI Stock Analysis Chatbot
 
+Demo: stockanalyzer-nlp.streamlit.app
+
 A multi-dimensional stock analysis platform that scores any publicly traded stock across five analytical dimensions and explains the result through a conversational AI agent. Built in Python with Streamlit, powered by OpenAI GPT (function calling) and live market data from Yahoo Finance.
 
 > **Note:** This tool is for educational purposes only and does not constitute financial advice.
